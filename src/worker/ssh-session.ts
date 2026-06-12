@@ -34,6 +34,7 @@ export class SSHSession {
   private channel: SSHChannel;
   private encryptCipher: SSHAESGCMCipher | null = null;
   private decryptCipher: SSHAESGCMCipher | null = null;
+  private derivedKeys: any = null;
 
   private seqNumSend: number = 0;
   private seqNumRecv: number = 0;
@@ -43,7 +44,7 @@ export class SSHSession {
   private kexInitRemote: Uint8Array | null = null;
 
   private ecdhKeyPair!: CryptoKeyPair;
-  private ecdhPublicKeySSH!: Uint8Array;
+  private ecdhRawPublicKey!: Uint8Array;
 
   private state: 'connecting' | 'version' | 'kex' | 'auth' | 'shell' | 'ready'
     = 'connecting';
@@ -127,12 +128,12 @@ export class SSHSession {
     this.ecdhKeyPair = await ECDHKeyExchange.generateKeyPair();
     console.log('[KEX] ECDH key pair generated');
     
-    this.ecdhPublicKeySSH = await ECDHKeyExchange.exportPublicKeyForSSH(
+    this.ecdhRawPublicKey = await ECDHKeyExchange.exportRawPublicKey(
       this.ecdhKeyPair
     );
-    console.log('[KEX] Public key exported, length:', this.ecdhPublicKeySSH.length);
+    console.log('[KEX] Raw public key exported, length:', this.ecdhRawPublicKey.length);
 
-    const ecdhInit = ECDHKeyExchange.buildInit(this.ecdhPublicKeySSH);
+    const ecdhInit = ECDHKeyExchange.buildInit(this.ecdhRawPublicKey);
     const ecdhPacket = SSHPacketBuilder.build(
       ecdhInit, 8, null, this.seqNumSend++
     );
@@ -200,18 +201,17 @@ export class SSHSession {
         break;
 
       case SSH_MSG_NEWKEYS:
-        console.log('[KEX] Received NEWKEYS');
-        await this.enableEncryption();
-        console.log('[KEX] Encryption enabled');
+        console.log('[KEX] Received NEWKEYS from server');
 
         const newKeys = new Uint8Array([SSH_MSG_NEWKEYS]);
         const packet = SSHPacketBuilder.build(
-          newKeys, 16,
-          (data, seq) => this.encryptCipher!.encrypt(data, seq) as any,
-          this.seqNumSend++
+          newKeys, 8, null, this.seqNumSend++
         );
         await this.writeSocket(packet);
         console.log('[KEX] NEWKEYS sent');
+
+        await this.enableEncryption();
+        console.log('[KEX] Encryption enabled');
 
         this.state = 'auth';
         console.log('[SSH] State changed to: auth');
@@ -222,16 +222,16 @@ export class SSHSession {
 
   private async handleECDHReply(payload: Uint8Array): Promise<void> {
     console.log('[KEX] Parsing ECDH_REPLY...');
-    const { hostKey, serverPublicKey, signature } =
+    const { hostKey, serverRawPublicKey, signature } =
       ECDHKeyExchange.parseReply(payload);
-    console.log('[KEX] ECDH_REPLY parsed');
+    console.log('[KEX] ECDH_REPLY parsed, hostKey:', hostKey.length, 'serverPubKey:', serverRawPublicKey.length, 'sig:', signature.length);
 
     console.log('[KEX] Computing shared secret...');
     const sharedSecret = await ECDHKeyExchange.computeSharedSecret(
       this.ecdhKeyPair.privateKey,
-      serverPublicKey
+      serverRawPublicKey
     );
-    console.log('[KEX] Shared secret computed');
+    console.log('[KEX] Shared secret computed, length:', sharedSecret.length);
 
     console.log('[KEX] Computing exchange hash...');
     const H = await ECDHKeyExchange.computeExchangeHash(
@@ -240,8 +240,8 @@ export class SSHSession {
       this.kexInitLocal!,
       this.kexInitRemote!,
       hostKey,
-      this.ecdhPublicKeySSH,
-      serverPublicKey,
+      this.ecdhRawPublicKey,
+      serverRawPublicKey,
       sharedSecret
     );
     console.log('[KEX] Exchange hash computed');
@@ -252,10 +252,14 @@ export class SSHSession {
     }
 
     console.log('[KEX] Deriving keys...');
-    const keys = await KeyDerivation.deriveKeys(sharedSecret, H, this.sessionID!);
-    console.log('[KEX] Keys derived');
+    this.derivedKeys = await KeyDerivation.deriveKeys(sharedSecret, H, this.sessionID!);
+    console.log('[KEX] Keys derived, waiting for NEWKEYS...');
+  }
 
-    console.log('[KEX] Initializing encryption ciphers...');
+  private async enableEncryption(): Promise<void> {
+    console.log('[KEX] Enabling encryption...');
+    const keys = this.derivedKeys;
+
     this.encryptCipher = new SSHAESGCMCipher(
       keys.encKeyClientToServer,
       keys.ivClientToServer
@@ -268,10 +272,6 @@ export class SSHSession {
     );
     await this.decryptCipher.init();
     console.log('[KEX] Encryption ciphers ready');
-  }
-
-  private async enableEncryption(): Promise<void> {
-    console.log('[KEX] Enabling encryption...');
   }
 
   private async authenticate(): Promise<void> {
@@ -347,7 +347,7 @@ export class SSHSession {
 
       case SSH_MSG_CHANNEL_DATA:
         const outputData = this.channel.handleChannelData(payload);
-        this.ws.send(outputData.buffer);
+        this.ws.send(outputData.slice().buffer);
         break;
 
       case SSH_MSG_CHANNEL_WINDOW_ADJUST:
