@@ -12,7 +12,6 @@ export interface SSHConnectionConfig {
   password?: string;
   authMethod?: 'password' | 'publickey';
   privateKey?: string;
-  turnstileToken?: string | null;
 }
 
 export const THEMES = {
@@ -110,11 +109,6 @@ export class SSHTerminal {
     const wsUrl = new URL(window.location.href);
     wsUrl.protocol = wsUrl.protocol === 'https:' ? 'wss:' : 'ws:';
     wsUrl.pathname = '/api/ssh';
-
-    // Add Turnstile token if provided
-    if (config.turnstileToken) {
-      wsUrl.searchParams.set('turnstile_token', config.turnstileToken);
-    }
 
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(wsUrl.toString());

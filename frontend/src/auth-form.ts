@@ -44,7 +44,7 @@ async function decryptCredentials(stored: string): Promise<{ host: string; port:
 export class ConnectionForm {
   private terminal: SSHTerminal;
   private turnstileEnabled = false;
-  private turnstileToken: string | null = null;
+  private turnstileVerified = false;
   private turnstileWidgetId: string | null = null;
 
   constructor(terminal: SSHTerminal) {
@@ -77,14 +77,30 @@ export class ConnectionForm {
     this.turnstileWidgetId = window.turnstile.render(container, {
       sitekey: '0x4AAAAAAB' + 'placeholder', // User needs to replace with their site key
       theme: 'dark',
-      callback: (token: string) => {
-        this.turnstileToken = token;
+      callback: async (token: string) => {
+        // Verify with backend and get cookie
+        try {
+          const response = await fetch('/api/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token }),
+          });
+          const result = (await response.json()) as { success: boolean };
+          if (result.success) {
+            this.turnstileVerified = true;
+            // Hide Turnstile widget after successful verification
+            const wrapper = document.getElementById('turnstile-container');
+            if (wrapper) wrapper.style.display = 'none';
+          }
+        } catch {
+          this.turnstileVerified = false;
+        }
       },
       'expired-callback': () => {
-        this.turnstileToken = null;
+        this.turnstileVerified = false;
       },
       'error-callback': () => {
-        this.turnstileToken = null;
+        this.turnstileVerified = false;
       },
     });
   }
@@ -244,7 +260,7 @@ export class ConnectionForm {
     }
 
     // Check Turnstile if enabled
-    if (this.turnstileEnabled && !this.turnstileToken) {
+    if (this.turnstileEnabled && !this.turnstileVerified) {
       alert('请完成人机验证');
       return;
     }
@@ -278,7 +294,6 @@ export class ConnectionForm {
         password,
         authMethod: this.authMode === 'key' ? 'publickey' : 'password',
         privateKey,
-        turnstileToken: this.turnstileToken,
       });
     } catch (error) {
       termSection.classList.add('hidden');

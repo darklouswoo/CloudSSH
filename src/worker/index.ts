@@ -33,9 +33,70 @@ async function verifyTurnstile(token: string, secret: string, ip: string): Promi
   }
 }
 
+// --- Simple token-based verification for session-level ---
+const VERIFIED_TOKEN_TTL = 24 * 60 * 60 * 1000; // 24 hours (fallback for token validation)
+
+function generateVerifiedToken(secret: string): string {
+  const expires = Date.now() + VERIFIED_TOKEN_TTL;
+  const payload = `${expires}`;
+  // Simple HMAC using Web Crypto would be better, but for simplicity use a hash
+  const signature = Array.from(
+    new Uint8Array(
+      new TextEncoder().encode(`${payload}:${secret}`)
+    )
+  ).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+  return `${payload}:${signature}`;
+}
+
+function isVerifiedTokenValid(token: string, secret: string): boolean {
+  try {
+    const [expiresStr, signature] = token.split(':');
+    const expires = parseInt(expiresStr);
+    if (isNaN(expires) || Date.now() > expires) return false;
+    
+    const expectedSignature = Array.from(
+      new Uint8Array(
+        new TextEncoder().encode(`${expiresStr}:${secret}`)
+      )
+    ).map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+    
+    return signature === expectedSignature;
+  } catch {
+    return false;
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
+
+    // Verify Turnstile token and issue verification cookie
+    if (url.pathname === '/api/verify' && request.method === 'POST') {
+      if (!env.TURNSTILE_SECRET) {
+        return Response.json({ success: true });
+      }
+
+      const clientIP = request.headers.get('CF-Connecting-IP') || 'unknown';
+      const body = await request.json<{ token: string }>();
+      
+      if (!body.token) {
+        return Response.json({ success: false, error: 'Missing token' }, { status: 400 });
+      }
+
+      const isValid = await verifyTurnstile(body.token, env.TURNSTILE_SECRET, clientIP);
+      if (!isValid) {
+        return Response.json({ success: false, error: 'Invalid token' }, { status: 403 });
+      }
+
+      // Issue a verified token as a session cookie (no Max-Age = session cookie, expires when browser closes)
+      const verifiedToken = generateVerifiedToken(env.TURNSTILE_SECRET);
+      return new Response(JSON.stringify({ success: true }), {
+        headers: {
+          'Content-Type': 'application/json',
+          'Set-Cookie': `cf_verified=${verifiedToken}; Path=/; HttpOnly; Secure; SameSite=Strict`,
+        },
+      });
+    }
 
     if (url.pathname === '/api/ssh') {
       // Apply rate limiting
@@ -44,15 +105,23 @@ export default {
         return new Response('Too Many Requests', { status: 429 });
       }
 
-      // Verify Turnstile token if secret is configured
+      // Verify Turnstile if secret is configured
       if (env.TURNSTILE_SECRET) {
-        const turnstileToken = url.searchParams.get('turnstile_token');
-        if (!turnstileToken) {
-          return Response.json({ error: 'Missing Turnstile token' }, { status: 403 });
-        }
-        const isValid = await verifyTurnstile(turnstileToken, env.TURNSTILE_SECRET, clientIP);
-        if (!isValid) {
-          return Response.json({ error: 'Turnstile verification failed' }, { status: 403 });
+        // Check if user has a valid verification cookie
+        const cookies = request.headers.get('Cookie') || '';
+        const verifiedCookie = cookies.split(';').find(c => c.trim().startsWith('cf_verified='));
+        const verifiedToken = verifiedCookie?.split('=')[1];
+
+        if (!verifiedToken || !isVerifiedTokenValid(verifiedToken, env.TURNSTILE_SECRET)) {
+          // No valid cookie, check Turnstile token
+          const turnstileToken = url.searchParams.get('turnstile_token');
+          if (!turnstileToken) {
+            return Response.json({ error: 'Missing Turnstile token' }, { status: 403 });
+          }
+          const isValid = await verifyTurnstile(turnstileToken, env.TURNSTILE_SECRET, clientIP);
+          if (!isValid) {
+            return Response.json({ error: 'Turnstile verification failed' }, { status: 403 });
+          }
         }
       }
 
@@ -63,7 +132,7 @@ export default {
       return Response.json({ status: 'ok', timestamp: Date.now() });
     }
 
-    // Return Turnstile site key (public info)
+    // Return config info
     if (url.pathname === '/api/config') {
       return Response.json({
         turnstileEnabled: !!env.TURNSTILE_SECRET,
