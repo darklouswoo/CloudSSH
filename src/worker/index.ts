@@ -1,4 +1,4 @@
-import { Env } from '../types';
+import { Env, SSHConnectionConfig } from '../types';
 import { HTML } from './html';
 import {
   handleGitHubAuth,
@@ -11,42 +11,24 @@ import {
 export { SSHSessionDO } from './durable-object';
 export { UserDBDO } from './user-db';
 
-// --- Rate Limiting (per-edge-node, best-effort) ---
-// 注意：在 Cloudflare Workers 分布式环境中，内存中的速率限制无效。
-// 建议使用 Cloudflare Dashboard 中的内置速率限制功能。
-// 此处提供基于内存的简单实现作为备用方案。
-const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
 const RATE_LIMIT_MAX = 10;      // max requests per window
 const RATE_LIMIT_WINDOW = 60000; // 1 minute window
-
-function isRateLimited(ip: string): boolean {
-  const now = Date.now();
-  const entry = rateLimitMap.get(ip);
-  if (!entry || now > entry.resetTime) {
-    rateLimitMap.set(ip, { count: 1, resetTime: now + RATE_LIMIT_WINDOW });
-    return false;
-  }
-  entry.count++;
-  return entry.count > RATE_LIMIT_MAX;
-}
 
 // 分布式速率限制（使用 Durable Object）
 async function isDistributedRateLimited(env: Env, ip: string): Promise<boolean> {
   try {
-    // 使用 UserDBDO 进行分布式速率限制
     const stub = getUserDBStub(env);
     const response = await stub.fetch(new Request('http://internal/internal/rate-limit/check', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ip, maxRequests: RATE_LIMIT_MAX, windowMs: RATE_LIMIT_WINDOW }),
     }));
-    
+
     if (!response.ok) return false;
     const result = await response.json<{ limited: boolean }>();
     return result.limited;
   } catch {
-    // 如果分布式速率限制失败，回退到本地速率限制
-    return isRateLimited(ip);
+    return false;
   }
 }
 
@@ -271,7 +253,7 @@ async function handleServersRoute(request: Request, url: URL, env: Env): Promise
 
   // POST /api/servers
   if (url.pathname === '/api/servers' && request.method === 'POST') {
-    const body = await request.json<any>();
+    const body = await request.json<Record<string, unknown>>();
     body.user_id = user.id;
     return stub.fetch(new Request('http://internal/internal/servers', {
       method: 'POST',
@@ -306,7 +288,7 @@ async function handleServersRoute(request: Request, url: URL, env: Env): Promise
 
     // PUT /api/servers/:id
     if (request.method === 'PUT') {
-      const body = await request.json<any>();
+      const body = await request.json<Record<string, unknown>>();
       body.user_id = user.id;
       return stub.fetch(new Request(`http://internal/internal/servers/${serverId}`, {
         method: 'PUT',
@@ -385,7 +367,7 @@ async function handleTokenSSHConnection(request: Request, env: Env, token: strin
     return Response.json({ error: 'Invalid or expired connection token' }, { status: 403 });
   }
 
-  const config = await tokenRes.json<any>();
+  const config = await tokenRes.json<SSHConnectionConfig>();
 
   // 将凭据编码后通过 URL 参数传给 SSHSessionDO（内部通信，不经过前端）
   const configBase64 = btoa(JSON.stringify(config));

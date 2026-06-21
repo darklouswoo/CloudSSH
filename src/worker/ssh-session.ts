@@ -1,4 +1,4 @@
-import { SSHConnectionConfig } from '../types';
+import { SSHConnectionConfig, SessionKeys, SSHPacket } from '../types';
 import {
   SSH_MSG_KEXINIT,
   SSH_MSG_NEWKEYS,
@@ -32,26 +32,18 @@ import { SSHAESGCMCipher } from '../ssh/crypto';
 import { SSHAuth } from '../ssh/auth';
 import { SSHChannel } from '../ssh/channel';
 
-function findCRLF(data: Uint8Array): number {
-  for (let i = 0; i < data.length - 1; i++) {
-    if (data[i] === 0x0d && data[i + 1] === 0x0a) {
-      return i;
-    }
-  }
-  return -1;
-}
-
 export class SSHSession {
   private ws: WebSocket;
   private socket: any;
   private config: SSHConnectionConfig;
+  private strictHostKeyVerify: boolean;
 
   private transport: SSHTransport;
   private packetParser: SSHPacketParser;
   private channel: SSHChannel;
   private encryptCipher: SSHAESGCMCipher | null = null;
   private decryptCipher: SSHAESGCMCipher | null = null;
-  private derivedKeys: any = null;
+  private derivedKeys: SessionKeys | null = null;
 
   private seqNumSend: number = 0;
   private sessionID: Uint8Array | null = null;
@@ -76,11 +68,13 @@ export class SSHSession {
   constructor(
     ws: WebSocket,
     socket: any,
-    config: SSHConnectionConfig
+    config: SSHConnectionConfig,
+    strictHostKeyVerify: boolean = true
   ) {
     this.ws = ws;
     this.socket = socket;
     this.config = config;
+    this.strictHostKeyVerify = strictHostKeyVerify;
 
     this.transport = new SSHTransport();
     this.packetParser = new SSHPacketParser();
@@ -252,7 +246,7 @@ export class SSHSession {
     }
   }
 
-  private async handlePacket(packet: any): Promise<void> {
+  private async handlePacket(packet: SSHPacket): Promise<void> {
     const msgType = packet.payload[0];
 
     // Transport-level messages handled regardless of state
@@ -418,20 +412,36 @@ export class SSHSession {
     this.sendDebug(`Host key fingerprint: ${this.hostKeyFingerprint}`);
 
     // Verify host key signature to confirm exchange hash is correct
+    let sigVerified: boolean | null = false;
     try {
-      const sigVerified = await this.verifyHostKeySignature(hostKey, signature, H);
+      sigVerified = await this.verifyHostKeySignature(hostKey, signature, H);
       if (sigVerified === null) {
         this.sendDebug('Host key signature verification: UNSUPPORTED ALGORITHM');
-        this.sendStatus('主机密钥签名验证被跳过（暂不支持该算法，但不影响连接）');
+        if (this.strictHostKeyVerify) {
+          this.sendError('主机密钥签名验证失败：不支持的密钥算法');
+          this.close();
+          return;
+        }
+        this.sendStatus('主机密钥签名验证被跳过（暂不支持该算法）');
       } else {
         this.sendDebug(`Host key signature verification: ${sigVerified ? 'PASS' : 'FAIL'}`);
         if (!sigVerified) {
-          this.sendError('主机密钥签名验证失败 - 可能会有安全风险或 Exchange Hash 计算错误，但不阻断连接。');
+          if (this.strictHostKeyVerify) {
+            this.sendError('主机密钥签名验证失败，连接被阻断。如需跳过，请设置 STRICT_HOST_KEY_VERIFY=false');
+            this.close();
+            return;
+          }
+          this.sendError('主机密钥签名验证失败 - 可能会有安全风险，但不阻断连接（严格模式已关闭）');
         }
       }
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e);
       this.sendDebug(`Signature verification error: ${errMsg}`);
+      if (this.strictHostKeyVerify) {
+        this.sendError('主机密钥签名验证异常: ' + errMsg);
+        this.close();
+        return;
+      }
     }
 
     if (!this.sessionID) {
@@ -611,7 +621,7 @@ export class SSHSession {
   }
 
   private async enableEncryption(): Promise<void> {
-    const keys = this.derivedKeys;
+    const keys = this.derivedKeys!;
     let encKeyC2S = keys.encKeyClientToServer;
     let encKeyS2C = keys.encKeyServerToClient;
 
@@ -622,11 +632,7 @@ export class SSHSession {
       encKeyS2C = encKeyS2C.slice(0, 16);
     }
 
-    const toHex = (a: Uint8Array) => Array.from(a).map(b => b.toString(16).padStart(2, '0')).join('');
-    this.sendDebug(`ivC2S=${toHex(keys.ivClientToServer)}`);
-    this.sendDebug(`encKeyC2S=${toHex(encKeyC2S)}`);
-    this.sendDebug(`ivS2C=${toHex(keys.ivServerToClient)}`);
-    this.sendDebug(`encKeyS2C=${toHex(encKeyS2C)}`);
+    this.sendDebug('Initializing ciphers');
 
     this.encryptCipher = new SSHAESGCMCipher(
       encKeyC2S,
@@ -829,8 +835,8 @@ export class SSHSession {
       );
       await this.writeSocket(encrypted);
     });
-    
-    this.sendMutex = operation.catch(() => {}); // prevent unhandled rejections from blocking the queue
+
+    this.sendMutex = operation.then(() => {}, () => {});
     await operation;
   }
 

@@ -1,4 +1,4 @@
-import { Env, UserInfo, ServerConfig } from '../types';
+import { Env, UserInfo, ServerConfig, SSHConnectionConfig } from '../types';
 
 /**
  * UserDBDO — 用户数据库 Durable Object（全局单例）
@@ -14,7 +14,8 @@ export class UserDBDO {
   private env: Env;
   private db: any; // SqlStorage (DO SQLite)
   // one-time-token 内存存储：token → { config, expiresAt }
-  private connectTokens: Map<string, { config: any; expiresAt: number }> = new Map();
+  private connectTokens: Map<string, { config: SSHConnectionConfig; expiresAt: number }> = new Map();
+  private static readonly MAX_CONNECT_TOKENS = 1000;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
@@ -290,12 +291,12 @@ export class UserDBDO {
     // 验证服务器属于该用户
     const existing = this.db.exec('SELECT user_id FROM servers WHERE id = ?', serverId).toArray();
     if (existing.length === 0) return Response.json({ error: 'Server not found' }, { status: 404 });
-    if ((existing[0] as any).user_id !== body.user_id)
+    if ((existing[0] as unknown as { user_id: number }).user_id !== body.user_id)
       return Response.json({ error: 'Forbidden' }, { status: 403 });
 
     // 构建更新语句
     const updates: string[] = [];
-    const values: any[] = [];
+    const values: (string | number)[] = [];
 
     if (body.name !== undefined) {
       updates.push('name = ?');
@@ -346,7 +347,7 @@ export class UserDBDO {
     // 验证服务器属于该用户
     const existing = this.db.exec('SELECT user_id FROM servers WHERE id = ?', serverId).toArray();
     if (existing.length === 0) return Response.json({ error: 'Server not found' }, { status: 404 });
-    if ((existing[0] as any).user_id !== body.user_id)
+    if ((existing[0] as unknown as { user_id: number }).user_id !== body.user_id)
       return Response.json({ error: 'Forbidden' }, { status: 403 });
 
     this.db.exec('DELETE FROM servers WHERE id = ?', serverId);
@@ -362,30 +363,38 @@ export class UserDBDO {
     const rows = this.db.exec('SELECT * FROM servers WHERE id = ? AND user_id = ?', serverId, body.user_id).toArray();
     if (rows.length === 0) return Response.json({ error: 'Server not found' }, { status: 404 });
 
-    const server = rows[0] as any;
+    const server = rows[0] as unknown as {
+      id: number; user_id: number; name: string; host: string;
+      port: number; username: string; credential: string; auth_method: string;
+    };
 
     // 解密凭据
     const credential = await this.decryptCredential(server.credential, body.user_id);
 
     // 生成 one-time-token
     const token = crypto.randomUUID();
-    const config = {
+    const config: SSHConnectionConfig = {
       host: server.host,
       port: server.port,
       username: server.username,
       password: server.auth_method === 'password' ? credential : '',
-      authMethod: server.auth_method,
+      authMethod: server.auth_method === 'publickey' ? 'publickey' : 'password',
       privateKey: server.auth_method === 'publickey' ? credential : '',
     };
+
+    // 防止 token 数量无限增长
+    if (this.connectTokens.size >= UserDBDO.MAX_CONNECT_TOKENS) {
+      this.cleanExpiredTokens();
+      if (this.connectTokens.size >= UserDBDO.MAX_CONNECT_TOKENS) {
+        return Response.json({ error: 'Too many pending connections' }, { status: 429 });
+      }
+    }
 
     // 存入内存，60 秒过期
     this.connectTokens.set(token, {
       config,
       expiresAt: Date.now() + 60_000,
     });
-
-    // 清理过期 token
-    this.cleanExpiredTokens();
 
     return Response.json({ token });
   }
@@ -516,7 +525,7 @@ export class UserDBDO {
       return Response.json({ limited: false });
     }
 
-    const row = rows[0] as any;
+    const row = rows[0] as unknown as { count: number; reset_time: string };
     const resetTimeDb = new Date(row.reset_time);
     
     if (now > resetTimeDb) {

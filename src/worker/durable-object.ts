@@ -173,7 +173,8 @@ export class SSHSessionDO {
 
       await socket.opened;
 
-      const session = new SSHSession(ws, socket, config);
+      const strictVerify = this.env.STRICT_HOST_KEY_VERIFY !== 'false';
+      const session = new SSHSession(ws, socket, config, strictVerify);
       this.sessions.set(ws, session);
 
       await session.startHandshake();
