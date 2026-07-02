@@ -1,6 +1,7 @@
 import { SSHTerminal, THEMES } from './terminal';
 import { ConnectionForm } from './auth-form';
 import { ServerList } from './server-list';
+import { SFTPPanel } from './sftp-panel';
 
 // ==================== 全局状态 ====================
 
@@ -8,9 +9,13 @@ const terminal = new SSHTerminal('terminal-container');
 let connectionForm: ConnectionForm | null = null;
 let serverList: ServerList | null = null;
 let isLoggedIn = false;
+let sftpPanel: SFTPPanel | null = null;
 
 terminal.setSessionClosedHandler(() => {
   showOfflineUI();
+});
+terminal.setSessionReadyHandler(() => {
+  sftpPanel?.handleSSHReady();
 });
 
 // ==================== 独立终端标签页模式 ====================
@@ -101,6 +106,12 @@ function showOfflineUI(): void {
     return;
   }
 
+  // Clean up SFTP panel
+  if (sftpPanel) {
+    sftpPanel.dispose();
+    sftpPanel = null;
+  }
+
   const termSection = document.getElementById('terminal-section');
   if (termSection) {
     termSection.classList.add('hidden');
@@ -145,8 +156,29 @@ function showTerminalFromServer(wsUrl: string, serverName: string): void {
 // ==================== 断开连接处理 ====================
 
 document.getElementById('disconnect-btn')?.addEventListener('click', () => {
+  if (sftpPanel) {
+    sftpPanel.hide();
+  }
   terminal.disconnect();
   showOfflineUI();
+});
+
+// ==================== SFTP 面板 ====================
+
+function initSFTPPanel(): void {
+  if (sftpPanel) {
+    sftpPanel.dispose();
+  }
+
+  sftpPanel = new SFTPPanel(() => terminal.getSFTPWebSocketUrl());
+  sftpPanel.bindEvents();
+}
+
+document.getElementById('sftp-toggle-btn')?.addEventListener('click', () => {
+  if (!sftpPanel) {
+    initSFTPPanel();
+  }
+  sftpPanel?.toggle();
 });
 
 // ==================== 主题切换 ====================
