@@ -48,6 +48,26 @@ describe('国际化核心', () => {
     expect(enUS['sftp.upload']).toBe('Upload file');
     expect(enUS['sftp.newFolder']).toBe('New folder');
   });
+
+  it('SFTP 右键菜单提供完整的中英文翻译', () => {
+    expect(zhCN['sftp.contextOpen']).toBe('打开');
+    expect(zhCN['sftp.contextDownload']).toBe('下载');
+    expect(zhCN['sftp.contextRename']).toBe('重命名');
+    expect(zhCN['sftp.contextDelete']).toBe('删除');
+    expect(enUS['sftp.contextOpen']).toBe('Open');
+    expect(enUS['sftp.contextDownload']).toBe('Download');
+    expect(enUS['sftp.contextRename']).toBe('Rename');
+    expect(enUS['sftp.contextDelete']).toBe('Delete');
+  });
+
+  it('SFTP 右键菜单不再硬编码展示文案', () => {
+    const source = readFileSync(new URL('../frontend/src/sftp-panel.ts', import.meta.url), 'utf8');
+    expect(source).toContain("label: t('sftp.contextOpen')");
+    expect(source).toContain("label: t('sftp.contextDownload')");
+    expect(source).toContain("label: t('sftp.contextRename')");
+    expect(source).toContain("label: t('sftp.contextDelete')");
+    expect(source).not.toMatch(/label:\s*'(?:Open|Download|Rename|Delete)'/);
+  });
 });
 
 describe('Agent 响应语言', () => {
@@ -67,5 +87,32 @@ describe('语言切换入口', () => {
     expect(beforeTerminal.match(/data-language-switcher/g)).toHaveLength(2);
     expect(terminalSection).not.toContain('data-language-switcher');
     expect(beforeTerminal).not.toContain('data-language-select');
+  });
+});
+
+describe('主题在线编辑器国际化', () => {
+  const html = readFileSync(new URL('../docs/theme-editor/index.html', import.meta.url), 'utf8');
+
+  it('与主项目共用语言偏好，并支持 URL、持久化设置和浏览器语言', () => {
+    expect(html).toContain("const LOCALE_STORAGE_KEY = 'cloudssh_locale'");
+    expect(html).toContain("new URLSearchParams(window.location.search).get('lang')");
+    expect(html).toContain('navigator.languages');
+    expect(html).toContain('id="language-toggle"');
+  });
+
+  it('提供完整的中英文词典和目标语言按钮', () => {
+    expect(html).toContain("'zh-CN': {");
+    expect(html).toContain("'en-US': {");
+    expect(html).toContain("'language.switchTo': '切换到{language}'");
+    expect(html).toContain("'language.switchTo': 'Switch to {language}'");
+    expect(html).toContain('data-language-preview-label');
+  });
+
+  it('同步最新终端和 SFTP 预览，并使用非阻塞反馈', () => {
+    expect(html).toContain('class="terminal-appbar"');
+    expect(html).toContain('data-i18n="sftp.renameAction"');
+    expect(html).toContain("'--scrollbar-thumb-hover'");
+    expect(html).toContain('id="toast-region"');
+    expect(html).not.toMatch(/\b(?:window\.)?(?:alert|confirm|prompt)\s*\(/);
   });
 });
